@@ -34,28 +34,17 @@ Ltac infer_hole :=
       unfold v_to_e_list, v_to_e => //=
   | |- context C [ ( _ ++ _) ++ _ ] =>
       rewrite -catA => /=
-  | |- ?l1 ++ ?l2 = ?x1 :: ?x2 :: ?x3 :: ?x4 :: ?x5 :: ?x6 :: ?x7 :: ?x8 :: ?l2 =>
-      try by instantiate (1 := [::x1; x2; x3; x4; x5; x6; x7; x8]) => //
-  | |- ?l1 ++ ?l2 = ?x1 :: ?x2 :: ?x3 :: ?x4 :: ?x5 :: ?x6 :: ?x7 :: ?l2 =>
-      try by instantiate (1 := [::x1; x2; x3; x4; x5; x6; x7]) => //
-  | |- ?l1 ++ ?l2 = ?x1 :: ?x2 :: ?x3 :: ?x4 :: ?x5 :: ?x6 :: ?l2 =>
-      try by instantiate (1 := [::x1; x2; x3; x4; x5; x6]) => //
-  | |- ?l1 ++ ?l2 = ?x1 :: ?x2 :: ?x3 :: ?x4 :: ?x5 :: ?l2 =>
-      try by instantiate (1 := [::x1; x2; x3; x4; x5]) => //
-  | |- ?l1 ++ ?l2 = ?x1 :: ?x2 :: ?x3 :: ?x4 :: ?l2 =>
-      try by instantiate (1 := [::x1; x2; x3; x4]) => //
-  | |- ?l1 ++ ?l2 = ?x1 :: ?x2 :: ?x3 :: ?l2 =>
-      try by instantiate (1 := [::x1; x2; x3]) => //
-  | |- ?l1 ++ ?l2 = ?x1 :: ?x2 :: ?l2 =>
-      try by instantiate (1 := [::x1; x2]) => //
-  | |- ?l1 ++ ?l2 = ?x :: ?l2 =>
-      try by instantiate (1 := [::x]) => //
-  | |- ?l ++ ?les = ?les =>
-      try by instantiate (1 := nil) => //
   | |- ?l1 ++ ?l2 = ?l3 ++ ?x :: ?l2 =>
       try instantiate (1 := l3 ++ [::x]); rewrite -catA => //=
   | _: _ |- ?l ++ _ = ?l ++ _ =>
       f_equal => //=
+  (* Requires at least one explicit `cons` to avoid excessive matching *)
+  | |- ?l1 ++ ?l2 = ?x :: ?l3 =>
+      is_evar l1;
+      let heads := constr:(ltac:(get_cons_chain_before (cons x l3) l2)) in
+      try by instantiate (1 := heads) => //
+  | |- ?l ++ ?les = ?les =>
+      try by instantiate (1 := nil) => //
   end.
 
 (* Try to resolve a reduction goal between ctx configs to the `reduce`
@@ -412,17 +401,46 @@ Proof.
     by remove_bools_options; simpl in *.
 Defined.
 
-Ltac resolve_invalid_value :=
+(* Auxiliary tactic for getting the length of a cons chain without free variables. *)
+Ltac get_cons_chain_length l :=
+  match l with
+  | _ :: ?tl => let n := get_cons_chain_length tl in constr:(S n)
+  | [::] => constr:(O)
+  | _ => fail "not a cons chain"
+  end.
+
+(* Getting the first n elements of a list and the rest, but only when they are a cons chain. *)
+Ltac get_cons_chain_firstn T l n :=
+  match n with
+  | O => constr:((@nil T, l))
+  | S ?n' => 
+      match l with
+      | ?h :: ?l' =>
+          let ret := get_cons_chain_firstn T l' n' in
+          match ret with
+          | (?l_extract, ?rest) => constr:((cons h l_extract, rest))
+          end
+      | _ => fail "insufficient destructed elements"
+      end
+  end.
+
+Ltac resolve_invalid_value_aux_expanded :=
   repeat match goal with
-  | Hvaltype : is_true (values_typing _ (rev (_ :: _)) _),
-    Hsub: (Tf [::_] _ <ti: _) |- _ =>
-      specialize (operand_subtyping1 Hvaltype Hsub) as Hopsub; clear Hsub; simpl in * => //=
-  | Hvaltype : is_true (values_typing _ (rev (_ :: _ :: _)) _),
-    Hsub: (Tf [::_; _] _ <ti: _) |- _ =>
-      specialize (operand_subtyping2 Hvaltype Hsub) as Hopsub; clear Hsub; simpl in * => //=
-  | Hvaltype : is_true (values_typing _ (rev (_ :: _ :: _ :: _)) _),
-    Hsub: (Tf [::_; _; _] _ <ti: _) |- _ =>
-      specialize (operand_subtyping3 Hvaltype Hsub) as Hopsub; clear Hsub; simpl in * => //=
+  | Hvaltype: is_true (values_typing ?s (rev (cons ?t ?vts1)) ?vts2),
+      Hsub: (Tf (cons ?h ?l') _ <ti: Tf ?vts2 _) |- _ =>
+      let n := get_cons_chain_length (cons h l') in
+      let T := type of t in
+      let ret := get_cons_chain_firstn T (cons t vts1) (n) in
+      match ret with
+      | (?l_extract, ?rest) =>
+          let Hopsub := fresh "Hopsub" in
+          assert (values_typing s l_extract (rev (cons h l'))) as Hopsub;
+          [ eapply operand_subtyping; by [apply Hvaltype | apply Hsub | reflexivity ] | clear Hsub; simpl in * => //= ]
+      end
+    end.
+
+Ltac resolve_invalid_value :=
+  repeat (resolve_invalid_value_aux_expanded; match goal with
   | Hvaltype : is_true (values_typing _ (rev (_ :: _)) _),
     Hsub: (Tf (_ ++ [::_]) _ <ti: _) |- _ =>
       specialize (operand_subtyping_suffix1 Hvaltype Hsub) as Hopsub; clear Hsub; simpl in * => //=
@@ -436,7 +454,8 @@ Ltac resolve_invalid_value :=
   | Hvaltype : is_true (value_typing _ (VAL_ref _) (T_vec _)) |- _ =>
       apply value_typing_ref_impl in Hvaltype as [? Hteq] => //
   | _ => simpl in *; remove_bools_options; subst => //
-end.
+end).
+
 
 Ltac discriminate_value_type :=
   resolve_invalid_typing; resolve_invalid_value.
