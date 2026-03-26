@@ -2,7 +2,7 @@ name: Deploy Rocqnavi API Documentation
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 jobs:
